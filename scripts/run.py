@@ -153,7 +153,7 @@ def fetch_dongqiudi() -> str:
         return f"(懂球帝采集失败: {e})"
 
 
-def fetch_zhibo8() -> str:
+def fetch_zhibo8(date_str: str = "") -> str:
     """抓取直播吧足球频道，提取世界杯相关标题和链接。"""
     _log("[采集] 直播吧 ...")
     url = "https://news.zhibo8.com/zuqiu/"
@@ -161,7 +161,7 @@ def fetch_zhibo8() -> str:
              '西班牙', '英格兰', '葡萄牙', '中国裁判', '马宁', '开幕', '揭幕',
              '世预赛', '巡礼', '球场', '热身赛', '参赛', '名单', '荷兰']
     # 只保留最近48小时的新闻
-    today = datetime.now(CST)
+    today = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=CST) if date_str else datetime.now(CST)
     valid_dates = {today.strftime("%Y-%m-%d"),
                    (today - timedelta(days=1)).strftime("%Y-%m-%d")}
     try:
@@ -195,23 +195,55 @@ def fetch_zhibo8() -> str:
         return f"(直播吧采集失败: {e})"
 
 
+def fetch_match_schedule_rss() -> str:
+    """抓取 Google News 赛程/结果 RSS，返回格式化的文本块。"""
+    _log("[采集] 赛程/结果 RSS ...")
+    url = ("https://news.google.com/rss/search?"
+           "q=world+cup+2026+results+schedule+fixtures+matches"
+           "&hl=en-US&ceid=US:en")
+    try:
+        result = subprocess.run(
+            ["curl", "-sL", "--max-time", "15", url],
+            capture_output=True, text=True, timeout=20,
+        )
+        root = ET.fromstring(result.stdout)
+        lines = []
+        count = 0
+        for item in root.findall(".//item"):
+            title = (item.find("title").text or "").strip() if item.find("title") is not None else ""
+            link = (item.find("link").text or "").strip() if item.find("link") is not None else ""
+            pubdate = (item.find("pubDate").text or "").strip() if item.find("pubDate") is not None else ""
+            source = (item.find("source").text or "").strip() if item.find("source") is not None else ""
+            date_cn = _parse_rss_date(pubdate)
+            if not title:
+                continue
+            lines.append(f"- **{title}** ({source}{' · ' + date_cn if date_cn else ''})\n  {link}")
+            count += 1
+        _log(f"[采集] 赛程: {count} 条")
+        return "\n".join(lines) if lines else "(赛程 RSS 暂无数据)"
+    except Exception as e:
+        _log(f"[采集] 赛程 RSS 失败: {e}")
+        return f"(赛程 RSS 采集失败: {e})"
+
+
 # ── Layer 2: Prompt 构建 ─────────────────────────────────────────
 
 def make_prompt(date_str: str, gnews_data: str, l30d_data: str,
-                dongqiudi_data: str, zhibo8_data: str) -> str:
-    now = datetime.now(CST)
-    today_cn = now.strftime("%Y年%m月%d日")
-    yesterday_cn = (now - timedelta(days=1)).strftime("%Y年%m月%d日")
-    weekday_cn = ["一","二","三","四","五","六","日"][now.weekday()]
-    days_left = (datetime(2026, 6, 11).date() - now.date()).days
+                dongqiudi_data: str, zhibo8_data: str, match_data: str) -> str:
+    today = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=CST)
+    yesterday = today - timedelta(days=1)
+    today_cn = today.strftime("%Y年%m月%d日")
+    yesterday_cn = yesterday.strftime("%Y年%m月%d日")
+    weekday_cn = ["一","二","三","四","五","六","日"][today.weekday()]
+    days_elapsed = (today.date() - datetime(2026, 6, 11).date()).days
 
-    return f"""今天是{today_cn}（周{weekday_cn}），距2026世界杯开幕还有{days_left}天。
+    return f"""今天是{today_cn}（周{weekday_cn}），世界杯已开赛{days_elapsed}天。
 时间范围：绝对只包含 {yesterday_cn} 和 {today_cn} 两天的内容。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ## 已采集数据（⚠️ 必须优先使用，这是记者团队为你准备的素材）
 
-以下四个来源独立采集，互不重叠。每个板块必须明确标注数据出处（域名+日期）。
+以下五个来源独立采集，互不重叠。每个板块必须明确标注数据出处（域名+日期）。
 
 ### A. 外媒（Google News RSS）★ 优先级最高
 覆盖 ESPN/BBC/CBS/The Athletic/FOX Sports/Guardian/Sky 等主流媒体。
@@ -233,10 +265,16 @@ def make_prompt(date_str: str, gnews_data: str, l30d_data: str,
 
 {l30d_data}
 
+### E. 赛程/结果（Google News RSS 专项查询）
+专门抓取比赛结果、赛程预告、比分报道。
+
+{match_data}
+
 ### ⚠️ 素材使用规则（必须遵守）
 
 每个板块的素材来源分配：
 - **今日头条**：A（外媒）主导，B/C 补充。不能纯中文源。
+- **今日赛程**：E（赛程）主导，A 中带比分/赛程的条目补充。已采集数据足够，禁止自行搜索。
 - **各队动态**：A 占至少 40%，B/C 合计不超过 60%。每个队标来源域名。
 - **创意/视觉**：A/B/C 任意组合，D 的 YouTube 如有也可用。
 - **话题/争议**：A 占至少一半。
@@ -244,15 +282,6 @@ def make_prompt(date_str: str, gnews_data: str, l30d_data: str,
 - **数据/预测**：A 主导，D(Polymarket) 补充。
 - **中国视角**：B/C 主导，不能用 A。
 - **UGC话题**：由头引用日报中的事件，话题覆盖A场外文化/B情绪认同/C技术社会讨论三类。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-## 补充搜索（site: 兜底，素材不够时用）
-
-- site:dongqiudi.com 世界杯 2026
-- site:zhibo8.com 世界杯
-- site:espn.com world cup 2026
-- site:fifa.com world cup 2026
-- site:skysports.com world cup 2026
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ## 🚫 黑名单
@@ -265,33 +294,36 @@ def make_prompt(date_str: str, gnews_data: str, l30d_data: str,
 ## 输出格式（严格遵守，# 层级不改）
 
 # 世界杯日报 · {today_cn}（周{weekday_cn}）
-距开幕还有 {days_left} 天
+已开赛 {days_elapsed} 天
 
 ## 1. 今日头条
 [1-2件当天最重要的事，各3-4句，主要来自外媒 RSS]
 
-## 2. 各队动态
+## 2. 今日赛程 / 赛程看点 ⚠️ 强制板块，不可跳过
+[必须写，严禁跳过。从 E(赛程RSS) 和 A(外媒RSS) 中提取当日比赛信息。格式：时间（北京时间）· 对阵 · 看点1句话。已完赛的标注比分，未开始的标注开球时间。如采集数据中确实无当日赛程，写"下一比赛日：XX月XX日 · 对阵预告"，不编造数据。]
+
+## 3. 各队动态
 | 球队 | 动态 | 亮点 | 潜力 | 来源 |
 |------|------|------|:--:|------|
 | 🇧🇷 巴西 | ... | ... | ⭐ | 域名 · 日期 |
 [至少8行。必须混用 A/B/C 三个来源，不能全是一个源]
 
-## 3. 创意/视觉
+## 4. 创意/视觉
 [球衣/meme/社媒创意。至少2条]
 
-## 4. 话题/争议
+## 5. 话题/争议
 [门票/FIFA/裁判/球迷。至少3条]
 
-## 5. 场外文化
+## 6. 场外文化
 [穿搭/联名/二创。至少2条]
 
-## 6. 数据/预测
+## 7. 数据/预测
 [赔率/预测。至少1条。优先用 D(last30days/Polymarket)+A(RSS)]
 
-## 7. 中国视角
-[⚠️ 至少2条。优先用 B(懂球帝) 和 C(直播吧) 素材。不够再用 site: 搜索补充。每条标注域名+日期。无法获取时写「今日暂无」，严禁用 AIGC 营销文填充。]
+## 8. 中国视角
+[⚠️ 至少2条。优先用 B(懂球帝) 和 C(直播吧) 素材。每条标注域名+日期。无法获取时写「今日暂无」，严禁用 AIGC 营销文填充。]
 
-## 8. 今日 UGC 互动话题
+## 9. 今日 UGC 互动话题
 [⚠️ 严格按以下规范生成，至少6条。每条引用日报中的具体事件作为"由头"，但话题本身必须是用户能直接参与的轻量互动。]
 
 话题规范：
@@ -307,6 +339,7 @@ def make_prompt(date_str: str, gnews_data: str, l30d_data: str,
 - **第一个字符就是 `#`**，严禁前言后语
 - 每条动态末尾标注来源域名和日期（如 `ESPN · 06.08`、`懂球帝 · 06.09`）
 - 禁止的元描述：搜索过程、工具状态、数据来源方式、"今日暂无"的原因解释
+- **禁止自行搜索或调用任何工具。所有素材已在上方采集数据中提供。**
 - 黑名单来源 → 删除。日期不符（早于 {yesterday_cn}）→ 删除。"""
 
 
@@ -325,16 +358,16 @@ def run(date_str: str) -> str | None:
     gnews_data = fetch_google_news_rss()
     l30d_data = collect_last30days()
     dongqiudi_data = fetch_dongqiudi()
-    zhibo8_data = fetch_zhibo8()
+    zhibo8_data = fetch_zhibo8(date_str)
+    match_data = fetch_match_schedule_rss()
 
     # Step 2: 构建 prompt
-    prompt = make_prompt(date_str, gnews_data, l30d_data, dongqiudi_data, zhibo8_data)
+    prompt = make_prompt(date_str, gnews_data, l30d_data, dongqiudi_data, zhibo8_data, match_data)
 
-    # Step 3: 调用 Claude（site: 搜索作为兜底）
+    # Step 3: 调用 Claude（纯排版，不搜索）
     _log(f"[日报] 生成 {date_str} ...")
     result = subprocess.run(
-        [CLAUDE_BIN, "-p", prompt, "--output-format", "text",
-         "--allowedTools", "WebSearch,WebFetch"],
+        [CLAUDE_BIN, "-p", prompt, "--output-format", "text"],
         capture_output=True, text=True, timeout=600, env=env,
     )
     if result.returncode != 0:
