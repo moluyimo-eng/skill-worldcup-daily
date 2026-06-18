@@ -339,7 +339,7 @@ def make_prompt(date_str: str, gnews_data: str, l30d_data: str,
 - **第一个字符就是 `#`**，严禁前言后语
 - 每条动态末尾标注来源域名和日期（如 `ESPN · 06.08`、`懂球帝 · 06.09`）
 - 禁止的元描述：搜索过程、工具状态、数据来源方式、"今日暂无"的原因解释
-- **禁止自行搜索或调用任何工具。所有素材已在上方采集数据中提供。**
+- **优先使用已采集数据。某个板块素材显著不足（<2条）时，用 site: 搜索补充，但每条必须标注来源域名+日期。**
 - 黑名单来源 → 删除。日期不符（早于 {yesterday_cn}）→ 删除。"""
 
 
@@ -367,7 +367,8 @@ def run(date_str: str) -> str | None:
     # Step 3: 调用 Claude（纯排版，不搜索）
     _log(f"[日报] 生成 {date_str} ...")
     result = subprocess.run(
-        [CLAUDE_BIN, "-p", prompt, "--output-format", "text"],
+        [CLAUDE_BIN, "-p", prompt, "--output-format", "text",
+         "--allowedTools", "WebSearch,WebFetch"],
         capture_output=True, text=True, timeout=600, env=env,
     )
     if result.returncode != 0:
